@@ -1,13 +1,26 @@
+# Python 3.10+ ; Linux/WSL2 com GPU NVIDIA (o vLLM não roda em Windows nativo)
+# Sistema: ffmpeg (Whisper lê .ogg/.mp3) e tkinter (Linux: sudo apt install ffmpeg python3-tk)
+#
+# Instalação:
+#   pip install -r requirements.txt
+#   pip install --upgrade backports.tarfile     # correção obrigatória
+# Se o pip reclamar de conflito de torch, instale o vllm primeiro (ele fixa a versão do torch):
+#   pip install vllm && pip install -r requirements.txt
+
+numpy<2.0.0
+backports.tarfile
+huggingface-hub
+customtkinter
+pandas
+pillow
 torch
-torchvision
 torchaudio
 transformers
 accelerate
-bitsandbytes
-safetensors
-openai-whisper
 vllm
-pandas
-numpy>=1.24.0,<2.0.0
-tqdm
-pathlib
+moondream
+whisper-timestamped
+openai-whisper
+
+# Llama 3.2 é "gated": aceite a licença em huggingface.co/meta-llama/Llama-3.2-3B-Instruct
+# e rode `huggingface-cli login` uma vez.
