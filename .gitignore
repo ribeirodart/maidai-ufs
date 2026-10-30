@@ -1,16 +1,1 @@
-.env
-__pycache__/
-*.pyc
-*.db
-.ipynb_checkpoints/
-
-data/evidence/visual.json
-data/evidence/audio.json
-data/evidence/entities.json
-data/evidence/events.json
-data/evidence/linguagem_codificada.json
-data/evidence/entity_event_relationships.json
-data/evidence/consolidado.json
-data/evidence/forensic_summary.json
-data/evidence/relatorio_forense_final.txt
-data/evidence/text_message.json
+output_iped/iped/
