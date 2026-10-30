@@ -168,7 +168,7 @@ def executar_analise_llama():
     )
 
     print("[Llama] Carregando modelo na VRAM (vLLM)...")
-    llm = LLM(model="meta-llama/Llama-3.2-3B-Instruct", max_model_len=32768, gpu_memory_utilization=0.92)
+    llm = LLM(model="meta-llama/Llama-3.2-3B-Instruct", max_model_len=32768, gpu_memory_utilization=0.8)
     # Temperatura 0 = decodificação determinística, ideal para extração de JSON
     sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=4096)
 

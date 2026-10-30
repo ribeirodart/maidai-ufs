@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 
 SRC_DIR = Path(__file__).resolve().parent
-PROJECT_DIR = SRC_DIR.parent
+PROJECT_DIR = SRC_DIR.parents[1]
 
 
 def evidence_dir_padrao() -> Path:
