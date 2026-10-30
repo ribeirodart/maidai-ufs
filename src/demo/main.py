@@ -10,10 +10,14 @@ import argparse
 import os
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 
 def checar_ambiente():
+    # No Python 3.12+ o tarfile da biblioteca padrão já traz o que o backports.tarfile oferece
+    if sys.version_info >= (3, 12):
+        return
     try:
         import backports.tarfile  # noqa: F401
     except ImportError:
@@ -55,18 +59,26 @@ def main():
         checar_ambiente()
 
     if not args.no_gui:
+        # Se a GUI falhar, mostra o erro real e PARA (não roda a pipeline pesada em silêncio).
         try:
             from gui import App
-            App(config.EVIDENCE_DIR, args.csv, args.searchapp).mainloop()
+        except ImportError as e:
+            print(f"[GUI] Não foi possível importar a interface: {e}")
+            print("      Instale com: pip install customtkinter   (ou rode com --no-gui)")
             return
-        except Exception as e:
-            print(f"[GUI] Indisponível ({e}). Seguindo no terminal.")
+        try:
+            App(config.EVIDENCE_DIR, args.csv, args.searchapp).mainloop()
+        except Exception:
+            traceback.print_exc()
+            print("\n[GUI] A janela não abriu (erro acima). Para rodar sem janela use --no-gui.")
+        return
 
-    pipeline.executar_pipeline(config.EVIDENCE_DIR, config.FILELIST)
+    ok = pipeline.executar_pipeline(config.EVIDENCE_DIR, config.FILELIST)
     print("\n" + "=" * 60)
     print(pipeline.formatar_relatorio(pipeline.pasta_saida(config.EVIDENCE_DIR)))
     if args.searchapp:
         print(pipeline.abrir_searchapp(args.searchapp)[1])
+    sys.exit(0 if ok else 1)   # código de saída 1 = pipeline sem relatório (útil em scripts/tmux)
 
 
 if __name__ == "__main__":

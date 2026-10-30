@@ -7,3 +7,4 @@ customtkinter==6.0.0
 pandas==3.0.6
 numpy==2.3.5
 python-dotenv==1.2.4
+backports.tarfile==1.2.0

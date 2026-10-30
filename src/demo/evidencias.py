@@ -23,6 +23,29 @@ COLUNAS_CAMINHO = ["caminho", "path", "filepath", "file_path"]
 COLUNAS_CATEGORIA = ["categoria", "category", "type", "tipo"]
 COLUNAS_EXT = ["ext", "extensão", "extensao", "extension"]
 
+def ler_txt():
+    # Procura pelo arquivo de texto da conversa diretamente na pasta de evidências
+    caminho_txt = config.OUTPUT_DIR / "text_message.txt"
+    
+    if not caminho_txt.is_file():
+        # Fallback para outros nomes caso o perito tenha nomeado diferente
+        caminho_txt = config.OUTPUT_DIR / "conversa_whatsapp.txt"
+        
+    if not caminho_txt.is_file():
+        print("[Llama] Aviso: text_message.txt não encontrado na pasta de evidências. Usando vazio.")
+        return ""
+        
+    try:
+        texto = caminho_txt.read_text(encoding="utf-8", errors="replace").strip()
+        print(f"[Llama] Histórico de mensagens carregado de {caminho_txt.name} ({len(texto)} caracteres).")
+        return texto
+    except Exception as e:
+        print(f"[Llama] Erro ao ler o arquivo de mensagens: {e}")
+        return ""
+
+# Carrega o conteúdo textual do chat
+mensagens = ler_txt()
+
 
 def _achar_coluna(df, candidatos):
     mapa = {str(c).strip().lower(): c for c in df.columns}
@@ -102,3 +125,15 @@ def listar_arquivos(regex, rotulo):
         print(f"[{rotulo}] Varredura de {pasta}: {len(achados)} arquivo(s) encontrados.")
 
     return sorted(dict.fromkeys(achados))
+
+def _parse_mensagens(txt):
+    """Converte o text_message.txt (colunas separadas por tab) em lista de dicts."""
+    msgs = []
+    for linha in str(txt or "").splitlines():
+        partes = linha.split("\t")
+        if len(partes) < 4 or not partes[0].strip().isdigit():
+            continue  # cabeçalho ou linha fora do padrão
+        msgs.append({"data_hora": partes[1].strip(),
+                     "remetente": partes[2].strip(),
+                     "mensagem": " ".join(partes[3:]).strip()})
+    return msgs

@@ -1,5 +1,7 @@
 """Renderiza o relatório forense final em Markdown/texto (sem dependências pesadas)."""
 from datetime import datetime
+from zoneinfo import ZoneInfo
+agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")
 
 
 def _lista(obj, *chaves):
@@ -33,7 +35,7 @@ def renderizar_markdown(relatorio, consolidado, alertas):
     nome_ent = {str(e.get("entity_id")): e.get("nome_ou_alias", "?") for e in ents}
     info_evt = {str(e.get("event_id")): e for e in evts}
 
-    L = ["# RELATÓRIO FORENSE", f"Gerado em: {datetime.now():%d/%m/%Y %H:%M}", ""]
+    L = ["# RELATÓRIO FORENSE", f"Gerado em: {agora}", ""]
 
     # 1. Resumo executivo
     L += ["## 1. Resumo Executivo", ""]
