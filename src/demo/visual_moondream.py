@@ -1,29 +1,3 @@
-"""Moondream — análise visual de foco pericial das imagens de evidência -> visual.json.
-
-Roda sozinho:  python src/visual_moondream.py
-
-Papel no pipeline: o texto gerado aqui é lido pelo llama_vllm.py, que extrai entidades, eventos,
-termos codificados e relações. Por isso o Moondream precisa (1) transcrever fielmente nomes, valores,
-horários, coordenadas, identificadores e carimbos de documento e (2) apontar itens de interesse SEM afirmá-los.
-
-Ruído: nenhuma imagem é descartada. Cada uma recebe o tipo (foto, captura de tela, documento), uma frase
-neutra de contexto e a transcrição do texto; ruído de interface, brinquedos ou desenhos são filtrados nas
-perguntas, não na saída. Falha de leitura vira um registro com "erro".
-
-Contexto da investigação: o Moondream não ouve o áudio (as imagens são processadas antes). Para ele olhar a
-imagem com o que foi dito em mente, escreva a hipótese do perito em <pasta de evidências>/contexto_filtro.txt
-(o mesmo arquivo que o llama_vllm.py já lê). Ela entra como pergunta fechada e a resposta é marcada como
-não verificada. Sem o arquivo, nada muda.
-
-Coordenadas: lidas por código do EXIF da imagem (não dependem do modelo) e, quando estampadas na própria
-foto, pelo prompt de texto. O local NÃO é interpretado: só indicado para conferência em mapa.
-
-Contrato com o llama_vllm.py (não quebrar):
-  - campos lidos: name, description, visible_text
-  - SEM_INDICIO tem que ser exatamente o texto abaixo: o llama_vllm.py o cita nas regras do prompt
-  - description que NÃO começa com SEM_INDICIO é tratada como conteúdo a analisar
-Campos extras (tipo_imagem, indicios, gps, revisar, erro) servem ao perito; o Llama os ignora.
-"""
 import gc
 import json
 import re
@@ -35,17 +9,13 @@ from PIL import Image
 import moondream as md
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import config  # noqa: E402
-from evidencias import REGEX_IMAGEM, listar_arquivos  # noqa: E402
+import config
+from evidencias import REGEX_IMAGEM, listar_arquivos
 
-SEM_INDICIO = "No suspicious elements visible."   # NÃO ALTERAR (ver contrato acima)
+SEM_INDICIO = "No suspicious elements visible."
 PREFIXO_ITENS = "Items of interest reported by the model (unverified, check the image):"
 MAX_CONTEXTO = 1000
 
-# ---------------------------------------------------------------------------
-# Prompts. Moondream responde melhor a perguntas curtas e fechadas; por isso cada tarefa é uma
-# pergunta, e o código monta a descrição final.
-# ---------------------------------------------------------------------------
 PROMPT_TIPO = (
     "Classify this image. Answer with exactly ONE word from this list: photo, screenshot, document, other. "
     "photo = a real-world scene taken by a camera. "
@@ -119,9 +89,6 @@ _TIPOS = {"photo": "photo", "photograph": "photo", "picture": "photo",
 _ROTULO_TIPO = {"screenshot": "Screenshot", "document": "Document"}
 
 
-# ---------------------------------------------------------------------------
-# Auxiliares
-# ---------------------------------------------------------------------------
 def _perguntar(model, image, pergunta):
     res = model.query(image, pergunta)
     resposta = res.get("answer", "") if isinstance(res, dict) else str(res)
@@ -129,13 +96,13 @@ def _perguntar(model, image, pergunta):
 
 
 def _tipo_imagem(resposta):
-    """Primeira palavra da resposta; na dúvida, 'photo' (assim a checagem de itens roda, não é pulada)."""
+    """Primeira palavra da resposta; na dúvida, 'photo'."""
     palavras = re.split(r"\W+", resposta.strip().lower())
     return _TIPOS.get(palavras[0] if palavras else "", "photo")
 
 
 def _negativo(resposta):
-    """True se a resposta nega o item ('no', 'none', 'There is no firearm...') ou vem vazia."""
+    """True se a resposta nega o item ou vem vazia."""
     t = resposta.strip().lower()
     if not t:
         return True
@@ -155,9 +122,9 @@ def _contexto_examinador():
 
 
 def _gps_exif(img):
-    """Latitude/longitude do EXIF em graus decimais, ou None. Lido por código, sem modelo."""
+    """Latitude/longitude do EXIF em graus decimais, ou None."""
     try:
-        gps = img.getexif().get_ifd(0x8825)  # GPSInfo
+        gps = img.getexif().get_ifd(0x8825)
         if not gps:
             return None
 
@@ -178,7 +145,6 @@ def _analisar(model, image, contexto, gps):
 
     itens = {}
     if tipo in ("screenshot", "document"):
-        # captura de tela ou documento: não faz sentido contar pessoas nem procurar armas
         base = f"{_ROTULO_TIPO[tipo]}: {_perguntar(model, image, PROMPT_TELA)}"
         foto = False
     else:
@@ -208,9 +174,6 @@ def _analisar(model, image, contexto, gps):
             "indicios": itens, "gps": gps, "revisar": bool(itens)}
 
 
-# ---------------------------------------------------------------------------
-# Processamento
-# ---------------------------------------------------------------------------
 def processar_imagens_moondream():
     imagens = listar_arquivos(REGEX_IMAGEM, "Moondream")
     if not imagens:
@@ -229,7 +192,7 @@ def processar_imagens_moondream():
         print(f"[Moondream] Analisando: {caminho.name}")
         try:
             with Image.open(caminho) as bruta:
-                gps = _gps_exif(bruta)          # o convert abaixo descarta o EXIF
+                gps = _gps_exif(bruta)
                 image = bruta.convert("RGB")
             analise = _analisar(model, image, contexto, gps)
             resultado.append({"name": caminho.name, "path": str(caminho), **analise})
@@ -238,7 +201,6 @@ def processar_imagens_moondream():
             if gps:
                 print(f"[Moondream] {caminho.name}: GPS no EXIF: {gps['latitude']}, {gps['longitude']}")
         except Exception as e:
-            # a imagem continua no registro: o perito precisa saber que ela não foi analisada
             print(f"[Moondream] Erro em {caminho.name}: {e}")
             resultado.append({
                 "name": caminho.name, "path": str(caminho),
