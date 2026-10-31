@@ -1,24 +1,5 @@
-"""Llama 3.2 3B via vLLM — análise forense multimodal (LEAP + AutoSchemaKG).
-
-Fluxo, inspirado no AutoSchemaKG (entidades -> eventos -> relações -> conceitos):
-  1. Entidades             nós do grafo (substantivos específicos)
-  2. Linguagem codificada  hipóteses sobre termos ditos
-  3. Eventos               frases autocontidas, ancoradas em um trecho literal da evidência
-  4. Relações              entidade-entidade e evento-evento (entidade-evento vem do passo 3)
-  5. Relatório
-
-Princípio central (antialucinação): o modelo PROPÕE, o código CONFERE.
-Nomes, termos e trechos citados pelo modelo são validados contra o texto real das evidências;
-o que não consta nelas é descartado. Arquivo, fonte e timestamp vêm SEMPRE do código, nunca
-do modelo. Os prompts usam só moldes de formato (sem exemplos realistas), para o modelo
-não copiar o exemplo no lugar do caso.
-
-Roda sozinho:  python src/llama_vllm.py
-Opcional:      MAIDAI_DEBUG=1 mostra um resumo de cada etapa no terminal.
-"""
 import os
 
-# contorna o erro do nvcc (precisa ser definido ANTES de importar o vllm)
 os.environ["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
 
 import gc
@@ -32,42 +13,38 @@ import torch
 from vllm import LLM, SamplingParams
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import config  
-from evidencias import ler_csv  
-from evidencias import ler_txt
-from evidencias import _parse_mensagens
-from relatorio import renderizar_markdown  
+import config  # noqa: E402
+from evidencias import ler_csv  # noqa: E402
+from evidencias import ler_txt  # noqa: E402
+from evidencias import _parse_mensagens  # noqa: E402
+from relatorio import renderizar_markdown  # noqa: E402
 
 DEBUG = os.environ.get("MAIDAI_DEBUG") == "1"
 
-MAX_CHARS = 12000          # limite por fonte de evidência (contexto do modelo = 32768 tokens)
+MAX_CHARS = 12000
 MAX_CHARS_CONSOLIDADO = 40000
 MAX_LINHAS_CSV = 200
 MAX_ARQUIVOS_GEO_NO_PROMPT = 50
 
-# colunas do CSV do IPED enviadas ao modelo (hashes, datas e TrackId só gastam tokens)
 COLUNAS_UTEIS_CSV = {"nome", "name", "ext", "categoria", "category", "marcador", "bookmark",
                      "caminho", "path", "deletado", "deleted", "recuperado", "carved"}
 
-# latitude/longitude/altitude: lidas por código; o modelo só recebe a lista de arquivos
 COL_GEO = re.compile(r"(?<![a-z])(lat(itude)?|lon(g(itude)?)?|alt(itude)?)(?![a-z])", re.I)
 
-# termos de interesse para filtrar o CSV (nome/categoria/caminho); ajuste ao caso
 PADRAO_REGEX = re.compile(r"(pix|arma|droga|pagamento|entrega|palmeiras)", re.I)
 
-# vocabulário controlado
 TIPOS_EVENTO = ("entrega", "transacao", "negociacao", "encontro", "comunicacao", "ameaca",
                 "porte_arma", "trafico_drogas", "ocultacao", "outro")
-RELACOES_EVENTO_EVENTO = ("antes", "depois", "ao_mesmo_tempo", "porque", "como_resultado")  # AutoSchemaKG
-RELACOES_CAUSAIS = ("porque", "como_resultado")   # só estas vêm do modelo; a ordem temporal o código calcula
+RELACOES_EVENTO_EVENTO = ("antes", "depois", "ao_mesmo_tempo", "porque", "como_resultado")
+RELACOES_CAUSAIS = ("porque", "como_resultado")
 TIPOS_ENTIDADE = ("pessoa", "apelido", "local", "objeto_de_interesse", "organizacao", "telefone", "financeiro", "veiculo")
 TIPOS_PESSOA = ("pessoa", "apelido")
-TIPOS_COM_RELACAO = ("pessoa", "apelido", "organizacao", "local", "veiculo", "telefone")  # extremos de relação entidade-entidade
+TIPOS_COM_RELACAO = ("pessoa", "apelido", "organizacao", "local", "veiculo", "telefone")
 PAPEIS = ("remetente", "destinatario", "pagador", "recebedor", "local", "objeto", "participante")
 TIPOS_NUMERICOS_OK = ("telefone", "financeiro", "placa", "veiculo", "valor")
 FONTES_FALA = ("AUDIO", "WHATSAPP")
-LIMIAR_TRECHO = 0.75       # fração mínima das palavras de uma citação que precisa estar na evidência
-LIMITE_TRECHO = 400        # tamanho máximo do trecho literal guardado em cada evento
+LIMIAR_TRECHO = 0.75
+LIMITE_TRECHO = 400
 
 REGEX_DATA_HORA = re.compile(r"^\W*(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{1,2}:\d{2}(:\d{2})?)\W*$")
 RE_DATA = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b")
@@ -75,13 +52,8 @@ RE_HORA = re.compile(r"\b(\d{1,2}:\d{2}(?::\d{2})?)\b")
 RE_VALOR = re.compile(r"R\$\s?\d[\d.]*(?:,\d{2})?")
 RE_TRANSACAO = re.compile(r"\b(pix|transfer[eê]ncia|pagamento|comprovante)\b", re.I)
 RE_INICIO_AUDIO = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)")
-# marcas que indicam material de teste/fictício dentro do texto visível de uma imagem
 MARCAS_DOC = re.compile(r"simulad|fict[ií]ci|sint[eé]tic|amostra|sem valor|sem validade|exemplo|demonstra", re.I)
 
-
-# ---------------------------------------------------------------------------
-# Prompts (só moldes de formato; nenhum exemplo com dados realistas)
-# ---------------------------------------------------------------------------
 REGRAS_GERAIS = """DIRETRIZES DE ANÁLISE FORENSE (LEAP):
 - FOCO RELACIONAL E SUSPEITA: não julgue moralmente nem decrete culpa; avalie se as relações entre entidades e eventos configuram indícios de comportamento suspeito, com base estrita nas evidências.
 - USE SOMENTE AS EVIDÊNCIAS: não invente fatos, nomes, intenções, arquivos ou locais. Copie nomes e termos exatamente como aparecem.
@@ -185,9 +157,6 @@ Retorne APENAS um JSON válido neste molde:
 {FORMATO_REL}"""
 
 
-# ---------------------------------------------------------------------------
-# Leitura e preparo das evidências
-# ---------------------------------------------------------------------------
 def _ler_json(nome):
     p = config.OUTPUT_DIR / nome
     if not p.is_file():
@@ -205,7 +174,6 @@ def _escrever_json(dados, nome):
 
 
 def _extrair_json(texto):
-    # o modelo às vezes devolve cercas ```json ou texto antes/depois do objeto
     texto = re.sub(r"```(?:json)?", "", texto).strip()
     try:
         return json.loads(texto)
@@ -248,7 +216,6 @@ def _csv_filtrado():
 
 
 def _geolocalizacao():
-    # percorre o CSV inteiro, sem o filtro por regex; arquivo sem coordenadas fica de fora
     if not config.FILELIST.is_file():
         return []
     try:
@@ -268,7 +235,6 @@ def _geolocalizacao():
 
 
 def _secao_geo(geos):
-    # seção montada por código: o local não é interpretado, só indicado para conferência no IPED
     if not geos:
         return ""
     linhas = ["", "## Metadados de geolocalização (verificar no IPED)", "",
@@ -286,8 +252,7 @@ def _contexto_externo():
 
 
 def _montar_trechos(audio, imagem, mensagens):
-    """Índice de tudo o que é CITÁVEL: cada fala, descrição, texto visível e mensagem.
-    É contra ele que nomes, termos e citações do modelo são conferidos."""
+    """Índice dos trechos citáveis (falas, descrições, textos visíveis e mensagens)."""
     trechos = []
 
     def add(fonte, arquivo, local, texto):
@@ -313,6 +278,7 @@ def _montar_trechos(audio, imagem, mensagens):
                 texto = f"{m['remetente']}: {texto}"
             add("WHATSAPP", "text_message.txt", m.get("data_hora") or m.get("index"), texto)
     return trechos
+
 
 def _cortar_linhas(linhas, limite, rotulo):
     """Corta em limite de caracteres sem partir uma linha ao meio."""
@@ -352,11 +318,8 @@ def _texto_evidencias(audio, imagem, mensagens, csv_rel, geos, contexto):
             f"CONTEXTO ADICIONAL: {contexto}")
 
 
-# ---------------------------------------------------------------------------
-# Conferência contra a evidência (a parte antialucinação)
-# ---------------------------------------------------------------------------
 def _proveniencia(trechos, nomes):
-    """Trechos em que aparecem TODAS as palavras de pelo menos um dos nomes."""
+    """Trechos em que aparecem todas as palavras de pelo menos um dos nomes."""
     alvos = [set(_norm(n).split()) for n in nomes if _norm(n)]
     return [t for t in trechos if any(a <= t["toks"] for a in alvos)]
 
@@ -378,12 +341,8 @@ def _slug(s):
     return _norm(s).replace(" ", "_")
 
 
-# ---------------------------------------------------------------------------
-# Geração em lote (vLLM agrupa as requisições em uma só passada)
-# ---------------------------------------------------------------------------
 def _gerar_lote(llm, params, pedidos):
-    """pedidos = [(system, user), ...]. Se o JSON vier inválido, repete a pergunta apontando o erro
-    (repetir igual com temperatura 0 daria a mesma resposta)."""
+    """Gera as respostas em lote. Se o JSON vier inválido, repete a pergunta apontando o erro."""
     conversas = [[{"role": "system", "content": s}, {"role": "user", "content": u}] for s, u in pedidos]
     resultados = [{} for _ in pedidos]
     pendentes = list(range(len(pedidos)))
@@ -404,9 +363,6 @@ def _gerar_lote(llm, params, pedidos):
     return resultados
 
 
-# ---------------------------------------------------------------------------
-# Etapas (cada uma valida o que o modelo propôs)
-# ---------------------------------------------------------------------------
 def _validar_entidades(proposta, trechos):
     vistos = {}
     for e in _itens(proposta, "entities"):
@@ -418,10 +374,9 @@ def _validar_entidades(proposta, trechos):
         if not chave or len(nome) > 80 or chave in vistos:
             continue
         if re.fullmatch(r"[\d\s.,:%-]{1,6}", nome) and tipo not in TIPOS_NUMERICOS_OK:
-            continue  # número solto
+            continue
         vistos[chave] = {"nome": nome, "tipo": tipo}
 
-    # unificação: "Francesco" (áudio) + "Francesco Virgolini" (imagem) = uma pessoa
     pessoas = {k: v for k, v in vistos.items() if v["tipo"] in ("pessoa", "apelido", "suspeito")}
     aliases, absorvidos = {}, set()
     for k in pessoas:
@@ -436,7 +391,7 @@ def _validar_entidades(proposta, trechos):
             continue
         achados = _proveniencia(trechos, [v["nome"]] + aliases.get(k, []))
         if not achados:
-            continue  # nome que não está em nenhuma evidência (ex.: copiado de exemplo)
+            continue
         eid = f"ENT_{len(entidades) + 1:03d}"
         arquivos = sorted({t["arquivo"] for t in achados})
         ent = {"entity_id": eid, "nome_ou_alias": v["nome"], "tipo": v["tipo"],
@@ -463,14 +418,14 @@ def _validar_alertas(proposta, trechos, entidades):
             descartados += 1
             continue
         achados = _proveniencia(fala, [termo])
-        if not achados:  # termo que ninguém disse
+        if not achados:
             descartados += 1
             continue
         vistos.add(n)
         conf = _slug(a.get("confianca", ""))
         conf = conf if conf in ("baixa", "media", "alta") else "baixa"
         if conf == "alta" and len({(t["arquivo"], t["local"]) for t in achados}) < 2:
-            conf = "media"  # "alta" exige recorrência do termo
+            conf = "media"
         t0 = achados[0]
         alertas.append({"termo": termo, "significado_provavel": sig, "contexto": t0["texto"][:240],
                         "arquivo": t0["arquivo"], "timestamp": t0["local"], "confianca": conf,
@@ -491,7 +446,7 @@ def _validar_eventos(proposta, trechos, entidades):
         tipo = _slug(ev.get("tipo", ""))
         tipo = tipo if tipo in TIPOS_EVENTO else "outro"
         if not desc or t is None or (t["i"], tipo) in vistos:
-            descartados += 1  # sem trecho real na evidência (ou duplicado)
+            descartados += 1
             continue
         vistos.add((t["i"], tipo))
         parts = []
@@ -516,7 +471,6 @@ def _validar_eventos(proposta, trechos, entidades):
 
 
 def _validar_relacoes(prop_ee, prop_vv, entidades, eventos, prov):
-    # entidade-evento: vem dos participantes já validados no passo 3
     ent_evt = [{"entity_id": p["entity_id"], "event_id": v["event_id"], "papel": p["papel"],
                 "arquivo": v["arquivo"], "timestamp": v["timestamp"]}
                for v in eventos for p in v["participantes"]]
@@ -534,7 +488,7 @@ def _validar_relacoes(prop_ee, prop_vv, entidades, eventos, prov):
         ia, ib = a["entity_id"], b["entity_id"]
         coocorrem = any({ia, ib} <= s for s in juntos_em_evento) or bool(prov.get(ia, set()) & prov.get(ib, set()))
         if not coocorrem or (ia, rel, ib) in vistos:
-            continue  # relação que a evidência não sustenta
+            continue
         vistos.add((ia, rel, ib))
         ent_ent.append({"origem_id": ia, "origem": a["nome_ou_alias"], "relacao": rel,
                         "destino_id": ib, "destino": b["nome_ou_alias"]})
@@ -551,7 +505,6 @@ def _validar_relacoes(prop_ee, prop_vv, entidades, eventos, prov):
 
 
 def _secao_grafo(relacoes, eventos):
-    """Relações entidade-entidade e evento-evento (o relatorio.py só renderiza entidade-evento)."""
     linhas = []
     if relacoes["entity_entity_relationships"]:
         linhas += ["", "## Relações entre entidades", ""]
@@ -565,7 +518,6 @@ def _secao_grafo(relacoes, eventos):
 
 
 def _inserir_antes_da_nota(base, extra):
-    """Coloca as seções extras antes da nota final ('---') do relatório."""
     if not extra.strip():
         return base
     corte = base.rfind("\n---\n")
@@ -579,9 +531,6 @@ def _debug(titulo, dados):
         print(f"\n[DEBUG - {titulo}] {json.dumps(dados, ensure_ascii=False)[:600]}\n")
 
 
-# ---------------------------------------------------------------------------
-# Pipeline
-# ---------------------------------------------------------------------------
 def executar_analise_llama():
     if not config.EVIDENCE_DIR.is_dir():
         raise FileNotFoundError(f"Pasta de evidências não encontrada: {config.EVIDENCE_DIR}")
@@ -597,11 +546,9 @@ def executar_analise_llama():
 
     print("[Llama] Carregando modelo na VRAM (vLLM)...")
     llm = LLM(model="meta-llama/Llama-3.2-3B-Instruct", max_model_len=32768, gpu_memory_utilization=0.8)
-    # temperatura 0 = decodificação determinística, ideal para extração de JSON
     sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=4096)
 
     try:
-        # ---- etapas 1 e 2: independentes entre si, rodam juntas no mesmo lote ----
         print("[Llama] Etapas 1-2/5: entidades e linguagem codificada")
         prop_ent, prop_cod = _gerar_lote(llm, sampling_params, [
             (SISTEMA, _prompt_entidades(evidencias)), (SISTEMA, _prompt_codificada(evidencias))])
@@ -614,7 +561,6 @@ def executar_analise_llama():
         _debug("Entidades", entidades)
         _debug("Linguagem codificada", alertas)
 
-        # ---- etapa 3: eventos ancorados em trecho literal ----
         print("[Llama] Etapa 3/5: eventos")
         prop_evt, = _gerar_lote(llm, sampling_params, [(SISTEMA, _prompt_eventos(evidencias, entidades, alertas))])
         eventos, desc_evt = _validar_eventos(prop_evt, trechos, entidades)
@@ -622,7 +568,6 @@ def executar_analise_llama():
         _escrever_json({"eventos": eventos}, "events.json")
         _debug("Eventos", eventos)
 
-        # ---- etapa 4: relações (entidade-entidade e evento-evento no mesmo lote) ----
         print("[Llama] Etapa 4/5: relações")
         pedidos = []
         if len(entidades) >= 2 and eventos:
@@ -642,7 +587,6 @@ def executar_analise_llama():
                                      "eventos_descartados": desc_evt}}
         _escrever_json(consolidado, "consolidado.json")
 
-        # ---- etapa 5: relatório ----
         print("[Llama] Etapa 5/5: relatório forense")
         if eventos or alertas:
             resumo = json.dumps({
@@ -655,7 +599,7 @@ def executar_analise_llama():
                 "relacoes_entre_eventos": relacoes["event_event_relationships"],
             }, ensure_ascii=False)[:MAX_CHARS_CONSOLIDADO]
             relatorio, = _gerar_lote(llm, sampling_params, [(SISTEMA, _prompt_relatorio(resumo))])
-        else:  # nada a narrar: sem chamar o modelo (evita resumo inventado)
+        else:
             relatorio = {"relatorio_forense": {
                 "resumo_executivo": "Não foram identificados eventos nem termos codificados sustentados pelas evidências analisadas.",
                 "pontos_atencao": [], "conclusao_preliminar": "Sem indícios com base nas evidências disponíveis."}}
@@ -663,10 +607,9 @@ def executar_analise_llama():
         if not isinstance(relatorio, dict):
             relatorio = {}
         rf = relatorio.get("relatorio_forense")
-        if not isinstance(rf, dict):  # o modelo pode devolver string/lista no lugar do objeto
+        if not isinstance(rf, dict):
             rf = relatorio["relatorio_forense"] = {}
 
-        # achados vêm dos eventos (código), não do modelo
         rf["achados"] = [{"evidencia": v["arquivo"], "fonte": v["fonte"], "timestamp": v["timestamp"],
                           "tipo": v["tipo"], "descricao": v["descricao"],
                           "relacionamento_suspeito": v["analise_relacionamento_suspeito"]} for v in eventos]
@@ -679,7 +622,6 @@ def executar_analise_llama():
         print(f"[Llama] Relatório formatado salvo em: {destino}")
         return relatorio
     finally:
-        # libera a VRAM, mesmo se alguma etapa falhar
         del llm
         gc.collect()
         try:
