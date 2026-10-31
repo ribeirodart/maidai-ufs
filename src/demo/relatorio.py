@@ -1,8 +1,6 @@
-"""Renderiza o relatório forense final em Markdown/texto (sem dependências pesadas)."""
+"""Renderiza o relatório forense final em Markdown/texto."""
 from datetime import datetime
 from zoneinfo import ZoneInfo
-agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")
-
 
 def _lista(obj, *chaves):
     if isinstance(obj, list):
@@ -24,6 +22,7 @@ def _txt(v):
 
 
 def renderizar_markdown(relatorio, consolidado, alertas):
+    agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")
     r = relatorio.get("relatorio_forense", relatorio) if isinstance(relatorio, dict) else {}
     if not isinstance(r, dict):
         r = {}
@@ -37,7 +36,6 @@ def renderizar_markdown(relatorio, consolidado, alertas):
 
     L = ["# RELATÓRIO FORENSE", f"Gerado em: {agora}", ""]
 
-    # 1. Resumo executivo
     L += ["## 1. Resumo Executivo", ""]
     if "raw_output" in r:
         L += ["(O modelo não devolveu JSON válido; saída bruta abaixo)", str(r["raw_output"])]
@@ -45,7 +43,6 @@ def renderizar_markdown(relatorio, consolidado, alertas):
         L.append(_txt(r.get("resumo_executivo") or r.get("resumo_geral")) or "Sem resumo gerado.")
     L.append("")
 
-    # 2. Entidades
     L += ["## 2. Mapeamento de Entidades", ""]
     if not ents:
         L.append("Nenhuma entidade relevante identificada.")
@@ -62,7 +59,6 @@ def renderizar_markdown(relatorio, consolidado, alertas):
             L.append(f"- **{_txt(e.get('nome_ou_alias'))}** ({_txt(e.get('entity_id'))}) — " + " | ".join(partes))
         L.append("")
 
-    # 3. Redes de relacionamento
     L += ["## 3. Redes de Relacionamento", ""]
     por_evento = {}
     for rel in rels:
@@ -79,7 +75,6 @@ def renderizar_markdown(relatorio, consolidado, alertas):
             L.append(f"    - {nome} → {_txt(rel.get('papel')) or 'participante'}")
     L.append("")
 
-    # 4. Linguagem codificada
     L += ["## 4. Alertas de Linguagem Codificada", ""]
     if not alertas:
         L.append("Nenhum termo com indício de linguagem codificada.")
@@ -95,7 +90,6 @@ def renderizar_markdown(relatorio, consolidado, alertas):
             L.append(f"    - Justificativa: {_txt(a.get('justificativa'))}")
     L.append("")
 
-    # 5. Achados
     achados = _lista(r.get("achados"), "achados")
     if achados:
         L += ["## 5. Achados por Evidência", ""]
