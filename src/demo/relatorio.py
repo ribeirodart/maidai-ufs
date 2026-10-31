@@ -1,6 +1,7 @@
 """Renderiza o relatório forense final em Markdown/texto."""
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+
+BRASILIA = timezone(timedelta(hours=-3))
 
 def _lista(obj, *chaves):
     if isinstance(obj, list):
@@ -22,7 +23,7 @@ def _txt(v):
 
 
 def renderizar_markdown(relatorio, consolidado, alertas):
-    agora = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("%d/%m/%Y %H:%M")
+    agora = datetime.now(BRASILIA).strftime("%d/%m/%Y %H:%M")
     r = relatorio.get("relatorio_forense", relatorio) if isinstance(relatorio, dict) else {}
     if not isinstance(r, dict):
         r = {}
