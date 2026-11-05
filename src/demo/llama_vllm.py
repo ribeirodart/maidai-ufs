@@ -14,9 +14,7 @@ from vllm import LLM, SamplingParams
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config  # noqa: E402
-from evidencias import ler_csv  # noqa: E402
-from evidencias import ler_txt  # noqa: E402
-from evidencias import _parse_mensagens  # noqa: E402
+from evidencias import carregar_mensagens, ler_csv  # noqa: E402
 from relatorio import renderizar_markdown  # noqa: E402
 
 DEBUG = os.environ.get("MAIDAI_DEBUG") == "1"
@@ -158,12 +156,26 @@ Retorne APENAS um JSON válido neste molde:
 
 
 def _ler_json(nome):
-    p = config.OUTPUT_DIR / nome
-    if not p.is_file():
+    """Lê um JSON de saída; em caso de ausência ou erro, retorna lista vazia."""
+    caminho = config.OUTPUT_DIR / nome
+    if not caminho.is_file():
         print(f"[Llama] Aviso: {nome} não encontrado. Usando vazio.")
         return []
-    with open(p, "r", encoding="utf-8") as f:
-        return json.load(f)
+
+    try:
+        with caminho.open("r", encoding="utf-8") as arquivo:
+            dados = json.load(arquivo)
+    except (OSError, json.JSONDecodeError) as erro:
+        print(f"[Llama] Erro ao ler {nome}: {erro}. Usando vazio.")
+        return []
+
+    if isinstance(dados, list):
+        return [item for item in dados if isinstance(item, dict)]
+    if isinstance(dados, dict):
+        return [dados]
+
+    print(f"[Llama] Aviso: formato inesperado em {nome}. Usando vazio.")
+    return []
 
 
 def _escrever_json(dados, nome):
@@ -276,7 +288,8 @@ def _montar_trechos(audio, imagem, mensagens):
             texto = m.get("mensagem") or m.get("message") or m.get("text") or m.get("texto")
             if texto and m.get("remetente"):
                 texto = f"{m['remetente']}: {texto}"
-            add("WHATSAPP", "text_message.txt", m.get("data_hora") or m.get("index"), texto)
+            nome_origem = m.get("arquivo") or "text_message.txt"
+            add("WHATSAPP", nome_origem, m.get("data_hora") or m.get("index"), texto)
     return trechos
 
 
@@ -535,20 +548,31 @@ def executar_analise_llama():
     if not config.EVIDENCE_DIR.is_dir():
         raise FileNotFoundError(f"Pasta de evidências não encontrada: {config.EVIDENCE_DIR}")
 
-    audio, imagem, mensagens = _ler_json("audio.json"), _ler_json("visual.json"), _parse_mensagens(ler_txt())
+    audio = _ler_json("audio.json")
+    imagem = _ler_json("visual.json")
+    mensagens = carregar_mensagens()
     trechos = _montar_trechos(audio, imagem, mensagens)
     if not trechos:
-        print("[Llama] Nenhuma evidência em audio.json, visual.json ou text_message.txt; análise cancelada.")
+        print("[Llama] Nenhuma evidência carregada de áudio, imagem ou mensagens; análise cancelada.")
         return None
     csv_rel, geos = _csv_filtrado(), _geolocalizacao()
     evidencias = _texto_evidencias(audio, imagem, mensagens, csv_rel, geos, _contexto_externo() or "Nenhum")
     SISTEMA = "Você é um perito forense digital. Responda apenas JSON válido, em português."
 
     print("[Llama] Carregando modelo na VRAM (vLLM)...")
-    llm = LLM(model="meta-llama/Llama-3.2-3B-Instruct", max_model_len=32768, gpu_memory_utilization=0.8)
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=4096)
+    llm = None
 
     try:
+        llm = LLM(
+            model="meta-llama/Llama-3.2-3B-Instruct",
+            max_model_len=32768,
+            gpu_memory_utilization=0.8,
+        )
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            top_p=1.0,
+            max_tokens=4096,
+        )
         print("[Llama] Etapas 1-2/5: entidades e linguagem codificada")
         prop_ent, prop_cod = _gerar_lote(llm, sampling_params, [
             (SISTEMA, _prompt_entidades(evidencias)), (SISTEMA, _prompt_codificada(evidencias))])
@@ -569,14 +593,23 @@ def executar_analise_llama():
         _debug("Eventos", eventos)
 
         print("[Llama] Etapa 4/5: relações")
-        pedidos = []
+        pedidos_relacoes = []
         if len(entidades) >= 2 and eventos:
-            pedidos.append((SISTEMA, _prompt_rel_entidades(entidades, eventos)))
+            pedidos_relacoes.append(("entidades", _prompt_rel_entidades(entidades, eventos)))
         if len(eventos) >= 2:
-            pedidos.append((SISTEMA, _prompt_rel_eventos(eventos)))
-        resp = iter(_gerar_lote(llm, sampling_params, pedidos)) if pedidos else iter(())
-        prop_ee = next(resp) if len(entidades) >= 2 and eventos else {}
-        prop_vv = next(resp) if len(eventos) >= 2 else {}
+            pedidos_relacoes.append(("eventos", _prompt_rel_eventos(eventos)))
+
+        respostas_relacoes = {}
+        if pedidos_relacoes:
+            pedidos_modelo = [(SISTEMA, prompt) for _, prompt in pedidos_relacoes]
+            respostas = _gerar_lote(llm, sampling_params, pedidos_modelo)
+            respostas_relacoes = {
+                nome: resposta
+                for (nome, _), resposta in zip(pedidos_relacoes, respostas)
+            }
+
+        prop_ee = respostas_relacoes.get("entidades", {})
+        prop_vv = respostas_relacoes.get("eventos", {})
         relacoes = _validar_relacoes(prop_ee, prop_vv, entidades, eventos, prov)
         _escrever_json(relacoes, "entity_event_relationships.json")
         _debug("Relações", relacoes)
@@ -622,15 +655,21 @@ def executar_analise_llama():
         print(f"[Llama] Relatório formatado salvo em: {destino}")
         return relatorio
     finally:
-        del llm
+        if llm is not None:
+            del llm
         gc.collect()
         try:
-            from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+            from vllm.distributed.parallel_state import (
+                destroy_distributed_environment,
+                destroy_model_parallel,
+            )
             destroy_model_parallel()
             destroy_distributed_environment()
         except Exception:
             pass
-        torch.cuda.empty_cache()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         print("[Llama] Modelo descarregado.")
 
 
