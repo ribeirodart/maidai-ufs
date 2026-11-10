@@ -68,7 +68,8 @@ PADROES_ALUCINACAO = re.compile(
 
 
 def _fmt(t):
-    return f"{int(t // 60):02d}:{t % 60:05.2f}"
+    total = int(round(max(0.0, float(t))))
+    return f"{total // 60:02d}:{total % 60:02d}"
 
 
 def _norm(s):
@@ -117,6 +118,42 @@ def _transcrever(model, audio):
         print(f"[Whisper] Aviso: opção de decodificação não aceita ({e}); usando opções mínimas.")
         return whisper.transcribe(model, audio, language="pt")
 
+def _dividir_segmentos(segmentos, maximo=8.0, minimo=2.0):
+    saida = []
+    for s in segmentos:
+        palavras = s.get("words") or []
+        n = len(palavras)
+        duracao = float(s.get("end") or 0) - float(s.get("start") or 0)
+        if n < 2 or duracao <= maximo:
+            saida.append(s)
+            continue
+
+        blocos, i = [], 0
+        while i < n:
+            j = i + 1
+            while j < n and (float(palavras[j].get("end") or 0)
+                             - float(palavras[i].get("start") or 0)) <= maximo:
+                j += 1
+            blocos.append((i, j))
+            i = j
+        if len(blocos) > 1:
+            i0, i1 = blocos[-1]
+            final = float(palavras[i1 - 1].get("end") or 0) - float(palavras[i0].get("start") or 0)
+            if i1 - i0 < 2 or final < minimo:
+                blocos[-2] = (blocos[-2][0], i1)
+                blocos.pop()
+
+        for i0, i1 in blocos:
+            pedaco = palavras[i0:i1]
+            novo = dict(s)
+            novo["start"] = round(pedaco[0]["start"], 2)
+            novo["end"] = round(pedaco[-1]["end"], 2)
+            novo["text"] = "".join(p.get("word") or "" for p in pedaco).strip()
+            novo["words"] = pedaco
+            novo["timestamp"] = f"[{_fmt(novo['start'])} -> {_fmt(novo['end'])}]"
+            novo["dividido_de"] = s.get("timestamp")
+            saida.append(novo)
+    return saida
 
 def _processar_segmentos(res):
     segmentos, descartados = [], []
@@ -153,7 +190,7 @@ def _processar_segmentos(res):
             item["motivos"] = motivos
         print(f"[Whisper] {ts}{' (incerto)' if decisao == 'incerto' else ''} {texto}")
         segmentos.append(item)
-    return segmentos, descartados
+    return _dividir_segmentos(segmentos), descartados
 
 
 def processar_audios_whisper():
